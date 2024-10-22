@@ -1,92 +1,74 @@
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import GLib from 'gi://GLib';
-import Gio from 'gi://Gio';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
+
+let micMonitor;
+let loopbackLoaded = false;
+let loopbackId = null;
 
 const MicMonitor = GObject.registerClass(
   class MicMonitor extends PanelMenu.Button {
     _init() {
       super._init(0.0, 'Mic Monitor');
-      this._loopbackLoaded = false;
-      this._loopbackId = null;
+      
+      this.buttonContainer = new St.Bin({
+        style_class: 'panel-button',
+        reactive: true,
+        can_focus: true,
+        track_hover: true
+      });
 
       this._icon = new St.Icon({
         icon_name: 'audio-input-microphone-symbolic',
         style_class: 'system-status-icon'
       });
-      this.add_child(this._icon);
+
+      this.buttonContainer.set_child(this._icon);
+      this.add_child(this.buttonContainer);
 
       this.connect('button-press-event', () => {
         this._toggleMicMonitor();
       });
-    }
 
-    async _toggleMicMonitor() {
-      try {
-        if (!this._loopbackLoaded) {
-          const [, stdout] = await this._spawnCommandLine("pactl load-module module-loopback");
-          this._loopbackId = stdout.toString().trim();
-          this._loopbackLoaded = true;
-          this._icon.icon_name = 'audio-input-microphone-high-symbolic';
-        } else {
-          await this._spawnCommandLine(`pactl unload-module ${this._loopbackId}`);
-          this._loopbackLoaded = false;
-          this._icon.icon_name = 'audio-input-microphone-symbolic';
-        }
-      } catch (error) {
-        logError(error);
-        Main.notify('Error toggling mic monitor', error.message);
-      }
-    }
-
-    _spawnCommandLine(command) {
-      return new Promise((resolve, reject) => {
-        try {
-          let [, pid, stdin, stdout, stderr] = GLib.spawn_async_with_pipes(
-            null, // working directory
-            ['bash', '-c', command], // command
-            null, // environment
-            GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
-            null // child setup function
-          );
-
-          let stdoutStream = new Gio.DataInputStream({
-            base_stream: new Gio.UnixInputStream({ fd: stdout })
-          });
-
-          let [out, size] = stdoutStream.read_line(null);
-
-          GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, () => {
-            GLib.spawn_close_pid(pid);
-          });
-
-          resolve([true, out]);
-        } catch (e) {
-          reject(e);
+      this.buttonContainer.connect('notify::hover', () => {
+        if (loopbackLoaded) {
+          this.buttonContainer.set_style('background-color: rgba(255, 255, 255, 0.25); border-radius: 16px; padding: 0 0px;');
         }
       });
     }
 
-    destroy() {
-      if (this._loopbackLoaded) {
-        this._spawnCommandLine(`pactl unload-module ${this._loopbackId}`).catch(logError);
+    _toggleMicMonitor() {
+      if (!loopbackLoaded) {
+        let [result, stdout] = GLib.spawn_command_line_sync("pactl load-module module-loopback");
+        if (result) {
+          loopbackId = stdout.toString().trim();
+          loopbackLoaded = true;
+          this.buttonContainer.set_style('background-color: rgba(255, 255, 255, 0.25); border-radius: 16px; padding: 0 0px;');
+        }
+      } else {
+        let [result] = GLib.spawn_command_line_sync("pactl unload-module " + loopbackId);
+        if (result) {
+          loopbackLoaded = false;
+          this.buttonContainer.set_style('');
+        }
       }
-      super.destroy();
     }
   }
 );
 
 export default class MicMonitorExtension extends Extension {
   enable() {
-    this._micMonitor = new MicMonitor();
-    Main.panel.addToStatusArea('mic-monitor', this._micMonitor);
+    micMonitor = new MicMonitor();
+    Main.panel.addToStatusArea('mic-monitor', micMonitor);
   }
 
   disable() {
-    this._micMonitor.destroy();
-    this._micMonitor = null;
+    if (loopbackLoaded) {
+      GLib.spawn_command_line_sync("pactl unload-module " + loopbackId);
+    }
+    micMonitor.destroy();
   }
 }
